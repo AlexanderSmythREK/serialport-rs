@@ -19,6 +19,11 @@ use crate::{
     SerialPortBuilder, StopBits,
 };
 
+
+#[derive(Debug)]
+struct Handle(HANDLE);
+unsafe impl Sync for Handle {}
+
 /// A serial port implementation for Windows COM ports
 ///
 /// The port will be closed when the value is dropped. However, this struct
@@ -27,7 +32,7 @@ use crate::{
 /// `serialport::open_with_settings()`.
 #[derive(Debug)]
 pub struct COMPort {
-    handle: HANDLE,
+    handle: Handle,
     timeout: Duration,
     port_name: Option<String>,
 }
@@ -110,7 +115,7 @@ impl COMPort {
         unsafe {
             DuplicateHandle(
                 process_handle,
-                self.handle,
+                match self.handle { Handle(h) => h},
                 process_handle,
                 &mut cloned_handle,
                 0,
@@ -119,7 +124,7 @@ impl COMPort {
             );
             if cloned_handle != INVALID_HANDLE_VALUE {
                 Ok(COMPort {
-                    handle: cloned_handle,
+                    handle: Handle(cloned_handle),
                     port_name: self.port_name.clone(),
                     timeout: self.timeout,
                 })
@@ -130,7 +135,7 @@ impl COMPort {
     }
 
     fn escape_comm_function(&mut self, function: DWORD) -> Result<()> {
-        match unsafe { EscapeCommFunction(self.handle, function) } {
+        match unsafe { EscapeCommFunction(match self.handle { Handle(h) => h}, function) } {
             0 => Err(super::error::last_os_error()),
             _ => Ok(()),
         }
@@ -139,7 +144,7 @@ impl COMPort {
     fn read_pin(&mut self, pin: DWORD) -> Result<bool> {
         let mut status: DWORD = 0;
 
-        match unsafe { GetCommModemStatus(self.handle, &mut status) } {
+        match unsafe { GetCommModemStatus(match self.handle { Handle(h) => h}, &mut status) } {
             0 => Err(super::error::last_os_error()),
             _ => Ok(status & pin != 0),
         }
@@ -149,7 +154,7 @@ impl COMPort {
         // It is not trivial to get the file path corresponding to a handle.
         // We'll punt and set it `None` here.
         COMPort {
-            handle: handle as HANDLE,
+            handle: Handle(handle as HANDLE),
             timeout: Duration::from_millis(100),
             port_name: None,
         }
@@ -159,14 +164,14 @@ impl COMPort {
 impl Drop for COMPort {
     fn drop(&mut self) {
         unsafe {
-            CloseHandle(self.handle);
+            CloseHandle(match self.handle { Handle(h) => h});
         }
     }
 }
 
 impl AsRawHandle for COMPort {
     fn as_raw_handle(&self) -> RawHandle {
-        self.handle as RawHandle
+        (match self.handle { Handle(h) => h}) as RawHandle
     }
 }
 
@@ -182,7 +187,7 @@ impl io::Read for COMPort {
 
         match unsafe {
             ReadFile(
-                self.handle,
+                match self.handle { Handle(h) => h},
                 buf.as_mut_ptr() as LPVOID,
                 buf.len() as DWORD,
                 &mut len,
@@ -210,7 +215,7 @@ impl io::Write for COMPort {
 
         match unsafe {
             WriteFile(
-                self.handle,
+                match self.handle { Handle(h) => h},
                 buf.as_ptr() as LPVOID,
                 buf.len() as DWORD,
                 &mut len,
@@ -223,7 +228,7 @@ impl io::Write for COMPort {
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        match unsafe { FlushFileBuffers(self.handle) } {
+        match unsafe { FlushFileBuffers(match self.handle { Handle(h) => h}) } {
             0 => Err(io::Error::last_os_error()),
             _ => Ok(()),
         }
@@ -250,7 +255,7 @@ impl SerialPort for COMPort {
             WriteTotalTimeoutConstant: 0,
         };
 
-        if unsafe { SetCommTimeouts(self.handle, &mut timeouts) } == 0 {
+        if unsafe { SetCommTimeouts(match self.handle { Handle(h) => h}, &mut timeouts) } == 0 {
             return Err(super::error::last_os_error());
         }
 
@@ -291,12 +296,12 @@ impl SerialPort for COMPort {
     }
 
     fn baud_rate(&self) -> Result<u32> {
-        let dcb = dcb::get_dcb(self.handle)?;
+        let dcb = dcb::get_dcb(match self.handle { Handle(h) => h})?;
         Ok(dcb.BaudRate as u32)
     }
 
     fn data_bits(&self) -> Result<DataBits> {
-        let dcb = dcb::get_dcb(self.handle)?;
+        let dcb = dcb::get_dcb(match self.handle { Handle(h) => h})?;
         match dcb.ByteSize {
             5 => Ok(DataBits::Five),
             6 => Ok(DataBits::Six),
@@ -310,7 +315,7 @@ impl SerialPort for COMPort {
     }
 
     fn parity(&self) -> Result<Parity> {
-        let dcb = dcb::get_dcb(self.handle)?;
+        let dcb = dcb::get_dcb(match self.handle { Handle(h) => h})?;
         match dcb.Parity {
             ODDPARITY => Ok(Parity::Odd),
             EVENPARITY => Ok(Parity::Even),
@@ -323,7 +328,7 @@ impl SerialPort for COMPort {
     }
 
     fn stop_bits(&self) -> Result<StopBits> {
-        let dcb = dcb::get_dcb(self.handle)?;
+        let dcb = dcb::get_dcb(match self.handle { Handle(h) => h})?;
         match dcb.StopBits {
             TWOSTOPBITS => Ok(StopBits::Two),
             ONESTOPBIT => Ok(StopBits::One),
@@ -335,7 +340,7 @@ impl SerialPort for COMPort {
     }
 
     fn flow_control(&self) -> Result<FlowControl> {
-        let dcb = dcb::get_dcb(self.handle)?;
+        let dcb = dcb::get_dcb(match self.handle { Handle(h) => h})?;
         if dcb.fOutxCtsFlow() != 0 || dcb.fRtsControl() != 0 {
             Ok(FlowControl::Hardware)
         } else if dcb.fOutX() != 0 || dcb.fInX() != 0 {
@@ -346,40 +351,40 @@ impl SerialPort for COMPort {
     }
 
     fn set_baud_rate(&mut self, baud_rate: u32) -> Result<()> {
-        let mut dcb = dcb::get_dcb(self.handle)?;
+        let mut dcb = dcb::get_dcb(match self.handle { Handle(h) => h})?;
         dcb::set_baud_rate(&mut dcb, baud_rate);
-        dcb::set_dcb(self.handle, dcb)
+        dcb::set_dcb(match self.handle { Handle(h) => h}, dcb)
     }
 
     fn set_data_bits(&mut self, data_bits: DataBits) -> Result<()> {
-        let mut dcb = dcb::get_dcb(self.handle)?;
+        let mut dcb = dcb::get_dcb(match self.handle { Handle(h) => h})?;
         dcb::set_data_bits(&mut dcb, data_bits);
-        dcb::set_dcb(self.handle, dcb)
+        dcb::set_dcb(match self.handle { Handle(h) => h}, dcb)
     }
 
     fn set_parity(&mut self, parity: Parity) -> Result<()> {
-        let mut dcb = dcb::get_dcb(self.handle)?;
+        let mut dcb = dcb::get_dcb(match self.handle { Handle(h) => h})?;
         dcb::set_parity(&mut dcb, parity);
-        dcb::set_dcb(self.handle, dcb)
+        dcb::set_dcb(match self.handle { Handle(h) => h}, dcb)
     }
 
     fn set_stop_bits(&mut self, stop_bits: StopBits) -> Result<()> {
-        let mut dcb = dcb::get_dcb(self.handle)?;
+        let mut dcb = dcb::get_dcb(match self.handle { Handle(h) => h})?;
         dcb::set_stop_bits(&mut dcb, stop_bits);
-        dcb::set_dcb(self.handle, dcb)
+        dcb::set_dcb(match self.handle { Handle(h) => h}, dcb)
     }
 
     fn set_flow_control(&mut self, flow_control: FlowControl) -> Result<()> {
-        let mut dcb = dcb::get_dcb(self.handle)?;
+        let mut dcb = dcb::get_dcb(match self.handle { Handle(h) => h})?;
         dcb::set_flow_control(&mut dcb, flow_control);
-        dcb::set_dcb(self.handle, dcb)
+        dcb::set_dcb(match self.handle { Handle(h) => h}, dcb)
     }
 
     fn bytes_to_read(&self) -> Result<u32> {
         let mut errors: DWORD = 0;
         let mut comstat = MaybeUninit::uninit();
 
-        if unsafe { ClearCommError(self.handle, &mut errors, comstat.as_mut_ptr()) != 0 } {
+        if unsafe { ClearCommError(match self.handle { Handle(h) => h}, &mut errors, comstat.as_mut_ptr()) != 0 } {
             unsafe { Ok(comstat.assume_init().cbInQue) }
         } else {
             Err(super::error::last_os_error())
@@ -390,7 +395,7 @@ impl SerialPort for COMPort {
         let mut errors: DWORD = 0;
         let mut comstat = MaybeUninit::uninit();
 
-        if unsafe { ClearCommError(self.handle, &mut errors, comstat.as_mut_ptr()) != 0 } {
+        if unsafe { ClearCommError(match self.handle { Handle(h) => h}, &mut errors, comstat.as_mut_ptr()) != 0 } {
             unsafe { Ok(comstat.assume_init().cbOutQue) }
         } else {
             Err(super::error::last_os_error())
@@ -404,7 +409,7 @@ impl SerialPort for COMPort {
             ClearBuffer::All => PURGE_RXABORT | PURGE_RXCLEAR | PURGE_TXABORT | PURGE_TXCLEAR,
         };
 
-        if unsafe { PurgeComm(self.handle, buffer_flags) != 0 } {
+        if unsafe { PurgeComm(match self.handle { Handle(h) => h}, buffer_flags) != 0 } {
             Ok(())
         } else {
             Err(super::error::last_os_error())
@@ -419,7 +424,7 @@ impl SerialPort for COMPort {
     }
 
     fn set_break(&self) -> Result<()> {
-        if unsafe { SetCommBreak(self.handle) != 0 } {
+        if unsafe { SetCommBreak(match self.handle { Handle(h) => h}) != 0 } {
             Ok(())
         } else {
             Err(super::error::last_os_error())
@@ -427,7 +432,7 @@ impl SerialPort for COMPort {
     }
 
     fn clear_break(&self) -> Result<()> {
-        if unsafe { ClearCommBreak(self.handle) != 0 } {
+        if unsafe { ClearCommBreak(match self.handle { Handle(h) => h}) != 0 } {
             Ok(())
         } else {
             Err(super::error::last_os_error())
